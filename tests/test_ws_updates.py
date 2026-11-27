@@ -18,8 +18,8 @@ Four things, each of which has already gone wrong somewhere in this workspace:
    where a silent failure looks exactly like success.
 
 (3) is covered twice on purpose. ``TestCrossWorkerFanOutOverOneBus`` uses a
-bus that models ``redis_coord``'s exact semantics and always runs, including
-in CI where no Redis is guaranteed. ``TestCrossWorkerFanOutOverRealRedis``
+bus that models the broadcaster's exact semantics and always runs, including
+in CI where no Redis is guaranteed. ``TestCrossWorkerFanOutOverCtxState``
 proves the same thing over an actual Redis and skips when there isn't one —
 same convention as aw-workspace's own
 ``src/tests/integration/api/test_w4_ws_registries_redis_relay.py``, whose
@@ -344,66 +344,11 @@ def _redis_url() -> str:
     return "redis://127.0.0.1:6379/0"
 
 
-def _real_relay_available() -> bool:
-    """Both halves have to be there: core's ``src.libs.redis_coord`` (absent
-    when this repo's tests run standalone, e.g. release CI) and a live Redis."""
-    try:
-        import redis as sync_redis  # noqa: F401
-
-        sys.path.insert(0, "/opt/aw-workspace")
-        from src.libs.redis_coord import RedisBroadcaster  # noqa: F401
-
-        return bool(sync_redis.Redis.from_url(
-            _redis_url(), socket_connect_timeout=2).ping())
-    except Exception:
-        return False
-
-
-@pytest.mark.skipif(
-    not _real_relay_available(),
-    reason="needs an aw-workspace checkout on sys.path AND a reachable Redis")
-class TestCrossWorkerFanOutOverRealRedis:
-    """The same assertion as above against a real ``RedisBroadcaster`` over a
-    real Redis. An in-process bus cannot prove what is actually under test —
-    two asyncio tasks with no shared Python state converging purely through
-    PUBLISH/PSUBSCRIBE, which is the real ten-process topology."""
-
-    def test_publish_on_worker_a_reaches_a_listener_on_worker_b(self):
-        async def scenario():
-            from src.libs.redis_coord import RedisBroadcaster
-
-            url = _redis_url()
-            worker_a = TaskUpdates(broadcaster=RedisBroadcaster(url))
-            worker_b = TaskUpdates(broadcaster=RedisBroadcaster(url))
-            await worker_a.start_relay()
-            await worker_b.start_relay()
-
-            ws_b = FakeWebSocket()
-            worker_b.add_listener(ws_b)
-
-            marker = f"t-{time.time()}"
-            await worker_a.publish(task_id=marker, action="finish", status="ok")
-
-            deadline = time.time() + 5.0
-            while time.time() < deadline and not ws_b.received:
-                await asyncio.sleep(0.05)
-
-            await worker_a.aclose()
-            await worker_b.aclose()
-            return marker, ws_b.received
-
-        marker, received = run(scenario())
-        assert received, "nothing crossed the real Redis relay"
-        frame = json.loads(received[-1])
-        _assert_valid_envelope(frame)
-        assert frame["data"]["task_id"] == marker
-
-
 def _ctx_state_available() -> bool:
     """Both halves have to be there: core's ``src.apps.base.AppContext``
     (absent when this repo's tests run standalone) and a live Redis — same
-    posture as ``_real_relay_available`` above, checking the facade this app
-    now goes through instead of ``src.libs.redis_coord`` directly."""
+    posture as aw-workspace's own integration tests, checking the facade this
+    app goes through."""
     try:
         import redis as sync_redis  # noqa: F401
 
@@ -440,9 +385,9 @@ def _fresh_ctx(app_id: str = "tasks"):
     not _ctx_state_available(),
     reason="needs an aw-workspace checkout on sys.path AND a reachable Redis")
 class TestCrossWorkerFanOutOverCtxState:
-    """Same regression as ``TestCrossWorkerFanOutOverRealRedis``, now proved
-    against the PRODUCTION transport: ``TaskUpdates(ctx=...)`` — migrated
-    off a direct ``src.libs.redis_coord`` import onto ``ctx.state.broadcast``
+    """The same assertion as ``TestCrossWorkerFanOutOverOneBus``, over a real
+    Redis and the PRODUCTION transport: ``TaskUpdates(ctx=...)`` — migrated
+    off a direct redis_coord import onto ``ctx.state.broadcast``
     (Kanban 3fe5bf3b-9510-81d6-bab5-f69e1580ba40, docs/standards/
     app-shared-state.md). Fails against the pre-migration module: that
     ``TaskUpdates`` had no ``ctx`` kwarg at all, so this call would raise
