@@ -394,9 +394,18 @@ class TestCrossWorkerFanOutOverCtxState:
     ``TypeError`` before ever reaching a relay.
     """
 
-    def test_publish_on_worker_a_reaches_a_listener_on_worker_b(self):
+    def test_publish_on_worker_a_reaches_a_listener_on_worker_b(self, monkeypatch):
+        # ctx.state resolves its endpoint via AW_WORKSPACE_REDIS_URL (then
+        # AW_REDIS_URL), NOT AW_TEST_REDIS_URL — pin it to the URL the
+        # skipif probe actually pinged, and drop the facade's cached client
+        # so it reconnects there instead of at a stale/default endpoint.
+        import src.apps.state_facade as state_facade
+
+        monkeypatch.setenv("AW_WORKSPACE_REDIS_URL", _redis_url())
+        monkeypatch.setenv("AW_WORKSPACE", f"tasks-ctxstate-test-{time.time()}")
+        monkeypatch.setattr(state_facade, "_client", None)
+
         async def scenario():
-            os.environ["AW_WORKSPACE"] = f"tasks-ctxstate-test-{time.time()}"
             worker_a = TaskUpdates(ctx=_fresh_ctx())
             worker_b = TaskUpdates(ctx=_fresh_ctx())
             await worker_a.start_relay()
